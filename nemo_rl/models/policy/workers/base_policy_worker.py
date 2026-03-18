@@ -73,7 +73,9 @@ class AbstractPolicyWorker:
 
     def get_zmq_address(self) -> str:
         """Get the ZMQ address for the current device."""
-        return f"ipc:///tmp/{self.report_device_id()}.sock"
+        import getpass
+        # NOTE : CHANGED FOR COMPUTE CANADA. To avoid collisions between users on the same cluster, we include the username in the socket name.
+        return f"ipc:///tmp/{getpass.getuser()}-{self.report_device_id()}.sock"
 
     def maybe_init_zmq(self) -> None:
         """Initialize the ZMQ socket if it doesn't exist."""

@@ -559,9 +559,21 @@ class BaseVllmGenerationWorker:
 )  # pragma: no cover
 class VllmGenerationWorker(BaseVllmGenerationWorker):
     def _create_engine(self, llm_kwargs: dict[str, Any]) -> None:
-        import vllm
+        if self.cfg.get("use_mh_sampling", False):
+            from mh_llm import MHLLM
 
-        self.llm = vllm.LLM(**llm_kwargs)
+            # Strip kwargs that mh-llm's LLM constructor doesn't accept.
+            # worker_extension_cls is intentionally kept so that NeMo RL's
+            # VllmInternalWorkerExtension (report_device_id, weight updates, etc.)
+            # is applied to the inner vLLM workers via the standard vLLM mechanism.
+            _nemo_rl_specific = {"enable_sleep_mode", "logprobs_mode"}
+            mh_kwargs = {k: v for k, v in llm_kwargs.items() if k not in _nemo_rl_specific}
+            mh_kwargs["skip_tokenizer_init"] = False
+            self.llm = MHLLM(**mh_kwargs)
+        else:
+            import vllm
+
+            self.llm = vllm.LLM(**llm_kwargs)
 
     def post_init(self):
         self.vllm_device_ids = self.report_device_id()
@@ -757,24 +769,53 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
 
         stop_strings = list(stop_strings) if len(stop_strings) > 0 else None
 
-        # Read generation parameters from config
-        top_k = self.cfg["top_k"] if self.cfg["top_k"] is not None else -1
-        sampling_params = self.SamplingParams(
-            temperature=self.cfg["temperature"] if not greedy else 0,
-            top_p=self.cfg["top_p"],
-            top_k=top_k if not greedy else 1,
-            max_tokens=self.cfg["max_new_tokens"],
-            stop_token_ids=self.cfg["stop_token_ids"],
-            stop=stop_strings,
-            include_stop_str_in_output=True,  # returning stop strings like hf
-        )
-
         # Generate outputs
         assert self.llm is not None, (
             "Attempting to generate with either an uninitialized vLLM or non-model-owner"
         )
-        outputs = self.llm.generate(data["prompts"], sampling_params)
-        texts = [output.outputs[0].text for output in outputs]
+
+        if self.cfg.get("use_mh_sampling", False):
+            from mh_llm.vllm import SamplingParams as MHSamplingParams
+
+            mh_alpha = self.cfg.get("mh_alpha", 4.0)
+            mh_params = MHSamplingParams(
+                alpha=mh_alpha,
+                temperature=1.0 / mh_alpha,
+            )
+            texts = self.llm.mh_sample(
+                prompts=data["prompts"],
+                sampling_params=mh_params,
+                block_size=self.cfg.get("mh_block_size", 192),
+                max_new_tokens=self.cfg["max_new_tokens"],
+                num_mcmc_steps=self.cfg.get("mh_num_mcmc_steps", 10),
+            )
+        elif self.cfg.get("use_beam_search", False):
+            from vllm.sampling_params import BeamSearchParams
+
+            beam_params = BeamSearchParams(
+                beam_width=self.cfg.get("best_of", 4),
+                max_tokens=self.cfg["max_new_tokens"],
+                temperature=0.0,
+                length_penalty=1.0,
+                include_stop_str_in_output=True,
+            )
+            outputs = self.llm.beam_search(
+                [{"prompt": p} for p in data["prompts"]], beam_params
+            )
+            texts = [output.sequences[0].text for output in outputs]
+        else:
+            top_k = self.cfg["top_k"] if self.cfg["top_k"] is not None else -1
+            sampling_params = self.SamplingParams(
+                temperature=self.cfg["temperature"] if not greedy else 0,
+                top_p=self.cfg["top_p"],
+                top_k=top_k if not greedy else 1,
+                max_tokens=self.cfg["max_new_tokens"],
+                stop_token_ids=self.cfg["stop_token_ids"],
+                stop=stop_strings,
+                include_stop_str_in_output=True,  # returning stop strings like hf
+            )
+            outputs = self.llm.generate(data["prompts"], sampling_params)
+            texts = [output.outputs[0].text for output in outputs]
 
         # Convert to BatchedDataDict
         return_data: BatchedDataDict[GenerationOutputSpec] = BatchedDataDict(

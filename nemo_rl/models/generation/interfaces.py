@@ -126,6 +126,12 @@ class GenerationConfig(TypedDict):
     model_name: NotRequired[str]  # Not Required b/c GRPO writes this
     stop_token_ids: list[int] | None
     stop_strings: list[str] | None
+    use_beam_search: NotRequired[bool]  # enables beam search; forces temperature=0
+    best_of: NotRequired[int]  # number of beams (default: 4)
+    use_mh_sampling: NotRequired[bool]  # enables Metropolis-Hastings sampling (mh-llm)
+    mh_alpha: NotRequired[float]  # power exponent for MH; temperature is set to 1/alpha (default: 4.0)
+    mh_block_size: NotRequired[int]  # tokens per MH block (default: 192)
+    mh_num_mcmc_steps: NotRequired[int]  # MH iterations per block (default: 10)
     colocated: NotRequired[ColocationConfig]
     # This isn't meant to be passed by the user, but is populated by nemo_rl.models.generation.__init__.configure_generation_config
     _pad_token_id: NotRequired[int]

@@ -1,0 +1,63 @@
+defaults:
+  - _self_
+  - hydra: base
+  - hydra/sweeper/params: null
+  - override hydra/launcher: nibi 
+
+eval:
+  metric: "pass@k"          # used only when k_values is not set
+  k_value: 1                # used only when k_values is not set
+  k_values: [1, 2, 4, 8, 16]  # computes both pass@k and cons@k for all k in one run
+  num_tests_per_prompt: 16  # must be >= max(k_values); set to 1 + temperature=0.0 for greedy
+  seed: 42
+  save_path: "sharpening_evals/results"  # scores.json (and optionally evaluation_data.json) written here
+
+generation:
+  backend: "vllm"
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  max_new_tokens: ${generation.vllm_cfg.max_model_len}
+  temperature: 0.7
+  top_p: 0.95
+  top_k: -1
+  num_prompts_per_step: -1
+  stop_token_ids: null
+  stop_strings: null
+  use_beam_search: false    # set to true to enable beam search (forces temperature=0)
+  best_of: 4                # number of beams (only used when use_beam_search=true)
+  use_mh_sampling: false    # set to true to enable Metropolis-Hastings sampling (https://arxiv.org/abs/2510.14901, pip install mh-llm)
+  mh_alpha: 4.0             # power exponent; temperature is set to 1/alpha automatically
+  mh_block_size: 192        # tokens per MH block (= max_model_len / 16)
+  mh_num_mcmc_steps: 10     # MH iterations per block
+  vllm_cfg:
+    async_engine: false # should be false for MH sampling or bem search
+    precision: "bfloat16"
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    expert_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    max_model_len: 4096
+    enforce_eager: false
+  colocated:
+    enabled: true
+    resources:
+      gpus_per_node: null
+      num_nodes: null
+
+tokenizer:
+  name: ${generation.model_name}
+  chat_template: "default"
+  chat_template_kwargs: null
+
+data:
+  dataset_name: math500
+  max_input_seq_length: ${generation.vllm_cfg.max_model_len}
+  prompt_file: "examples/prompts/cot.txt"
+  system_prompt_file: null
+
+env:
+  math:
+    num_workers: 8
+
+cluster:
+  gpus_per_node: 1
+  num_nodes: 1

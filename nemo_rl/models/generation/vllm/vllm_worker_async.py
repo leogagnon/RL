@@ -923,6 +923,12 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
                 "generate_text_async can only be used when async_engine is enabled in vLLM config."
             )
 
+        if self.cfg.get("use_mh_sampling", False):
+            raise RuntimeError(
+                "use_mh_sampling is not supported with async_engine=True. "
+                "Set vllm_cfg.async_engine=false to use MH sampling."
+            )
+
         # Handle empty input case
         if len(data["prompts"]) == 0:
             return
@@ -951,6 +957,12 @@ class VllmAsyncGenerationWorker(BaseVllmGenerationWorker):
             )
 
             # Create sampling parameters
+            if self.cfg.get("use_beam_search", False):
+                raise NotImplementedError(
+                    "Beam search is not supported with async_engine=True. "
+                    "Set vllm_cfg.async_engine=false to use beam search."
+                )
+
             top_k = self.cfg["top_k"] if self.cfg["top_k"] is not None else -1
             sampling_params = self.SamplingParams(
                 temperature=self.cfg["temperature"] if not greedy else 0,

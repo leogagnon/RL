@@ -66,7 +66,9 @@ class VllmInternalWorkerExtension:
 
     def get_zmq_address(self):
         """Get the ZMQ address for the current device."""
-        return f"ipc:///tmp/{self.report_device_id()}.sock"
+        import getpass
+
+        return f"ipc:///tmp/{getpass.getuser()}-{self.report_device_id()}.sock"
 
     def maybe_init_zmq(self):
         """Initialize the ZMQ socket if it doesn't exist."""

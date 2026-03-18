@@ -17,7 +17,7 @@ import json
 import os
 from collections import Counter
 from itertools import combinations
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import ray
 import torch
@@ -47,6 +47,7 @@ class EvalConfig(TypedDict):
     seed: int
     k_value: int
     save_path: str | None
+    k_values: NotRequired[list[int]]  # if set, overrides k_value and computes both pass@k and cons@k for all k
 
 
 # TODO: this should updated, but is left to avoid breaking changes
@@ -99,19 +100,22 @@ def setup(
     # Check settings
     metric = eval_config["metric"]
     k_value = eval_config["k_value"]
+    k_values = eval_config.get("k_values", None)
     num_tests_per_prompt = eval_config["num_tests_per_prompt"]
     temperature = generation_config["temperature"]
     top_k = generation_config["top_k"]
 
     # Validate metrics
-    assert metric in ["pass@k", "cons@k"], f"Invalid metric: {metric}"
+    if k_values is None:
+        assert metric in ["pass@k", "cons@k"], f"Invalid metric: {metric}"
     if num_tests_per_prompt > 1:
         assert temperature > 0 and top_k != 1, (
             "temperature > 0 and top_k != 1 are required for multiple samples"
         )
 
-    assert k_value >= 1, "k_value must be greater than or equal to 1"
-    assert num_tests_per_prompt >= k_value, (
+    max_k = max(k_values) if k_values else k_value
+    assert max_k >= 1, "k_value must be greater than or equal to 1"
+    assert num_tests_per_prompt >= max_k, (
         "num_tests_per_prompt must be greater than or equal to k_value "
     )
 
@@ -310,12 +314,21 @@ async def _run_env_eval_impl(
     metric = eval_config["metric"]
     num_tests_per_prompt = eval_config["num_tests_per_prompt"]
     k_value = eval_config["k_value"]
+    k_values = eval_config.get("k_values", None)
 
     # List to collect evaluation data for parquet file
     evaluation_data = []
 
-    # Run evaluation loop
-    score = 0.0
+    # Accumulators: multi-k mode uses a dict, single mode uses a scalar
+    if k_values:
+        scores: dict[str, float] = {
+            f"pass@{k}": 0.0 for k in k_values
+        } | {
+            f"cons@{k}": 0.0 for k in k_values
+        }
+    else:
+        score = 0.0
+
     for batch in dataloader:
         # measure multiple samples
         if num_tests_per_prompt > 1:
@@ -372,7 +385,14 @@ async def _run_env_eval_impl(
             )
 
         # update stats
-        if metric == "pass@k":
+        if k_values:
+            extracted_answers = env_return.answers
+            for k in k_values:
+                scores[f"pass@{k}"] += eval_pass_k(rewards, num_tests_per_prompt, k)
+                scores[f"cons@{k}"] += eval_cons_k(
+                    rewards, num_tests_per_prompt, k, extracted_answers
+                )
+        elif metric == "pass@k":
             score += eval_pass_k(rewards, num_tests_per_prompt, k_value)
         elif metric == "cons@k":
             extracted_answers = env_return.answers
@@ -388,19 +408,35 @@ async def _run_env_eval_impl(
 
     # Save evaluation data to JSON file if save_path is specified
     save_path = eval_config.get("save_path")
-    if evaluation_data and save_path is not None:
-        _save_evaluation_data_to_json(evaluation_data, master_config, save_path)
+    dataset_size = len(dataloader.dataset)
+    if save_path is not None:
+        if evaluation_data:
+            _save_evaluation_data_to_json(evaluation_data, master_config, save_path)
+        if k_values:
+            _save_scores_to_json(scores, dataset_size, master_config, save_path)
+        else:
+            _save_scores_to_json(
+                {f"{metric[:-1]}{k_value}": score},
+                dataset_size,
+                master_config,
+                save_path,
+            )
 
     # Print results
-    _print_results(
-        master_config,
-        generation_config,
-        score,
-        len(dataloader.dataset),
-        metric,
-        k_value,
-        num_tests_per_prompt,
-    )
+    if k_values:
+        _print_results_multi_k(
+            master_config, generation_config, scores, dataset_size, num_tests_per_prompt
+        )
+    else:
+        _print_results(
+            master_config,
+            generation_config,
+            score,
+            dataset_size,
+            metric,
+            k_value,
+            num_tests_per_prompt,
+        )
 
 
 async def _generate_texts(vllm_generation, inputs, use_async):
@@ -417,6 +453,24 @@ async def _generate_texts(vllm_generation, inputs, use_async):
     else:
         # Use sync generation
         return vllm_generation.generate_text(inputs)["texts"]
+
+
+def _save_scores_to_json(
+    raw_scores: dict[str, float], dataset_size: int, master_config: dict, save_path: str
+):
+    """Save aggregated scores to scores.json in save_path."""
+    os.makedirs(save_path, exist_ok=True)
+    scores_path = os.path.join(save_path, "scores.json")
+    output = {
+        "model_name": master_config["generation"]["model_name"],
+        "dataset_name": master_config["data"]["dataset_name"],
+        "num_tests_per_prompt": master_config["eval"]["num_tests_per_prompt"],
+        "dataset_size": dataset_size,
+        "scores": {k: v / dataset_size for k, v in raw_scores.items()},
+    }
+    with open(scores_path, "w") as f:
+        json.dump(output, f, indent=2)
+    print(f"\n✓ Scores saved to: {scores_path}")
 
 
 def _save_evaluation_data_to_json(evaluation_data, master_config, save_path):
@@ -476,6 +530,46 @@ def _save_evaluation_data_to_json(evaluation_data, master_config, save_path):
     print(f"\n✓ Evaluation data saved to: {eval_data_path}")
     print(f"  Total samples: {len(evaluation_data)}")
     print(f"  File size: {os.path.getsize(eval_data_path) / 1024 / 1024:.2f} MB")
+
+
+def _print_results_multi_k(
+    master_config,
+    generation_config,
+    scores: dict[str, float],
+    dataset_size: int,
+    num_tests_per_prompt: int,
+):
+    """Print evaluation results for multiple k values and both metrics."""
+    dataset_name = os.path.basename(master_config["data"]["dataset_name"])
+    model_name = os.path.basename(generation_config["model_name"])
+    max_new_tokens = generation_config["vllm_cfg"]["max_model_len"]
+    seed = master_config["eval"]["seed"]
+    temperature = generation_config["temperature"]
+    top_p = generation_config["top_p"]
+    top_k = generation_config["top_k"]
+
+    print("\n" + "=" * 60)
+    print(f"{model_name=} {dataset_name=}")
+    print(f"{max_new_tokens=} {temperature=} {top_p=} {top_k=} {seed=}")
+    print(f"{num_tests_per_prompt=}\n")
+
+    # Collect unique k values in sorted order
+    k_vals = sorted({int(key.split("@")[1]) for key in scores})
+
+    # Header
+    col_w = 12
+    header = f"{'metric':<10}" + "".join(f"k={k:<{col_w-2}}" for k in k_vals)
+    print(header)
+    print("-" * len(header))
+
+    for prefix in ("pass", "cons"):
+        row = f"{prefix+'@k':<10}"
+        for k in k_vals:
+            avg = scores[f"{prefix}@{k}"] / dataset_size
+            row += f"{avg:.4f}".ljust(col_w)
+        print(row)
+
+    print("=" * 60 + "\n")
 
 
 def _print_results(
