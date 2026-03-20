@@ -2,11 +2,11 @@ defaults:
   - submitit_slurm
 
 mem_gb: 300
-gres: gpu:h100:1
+gres: gpu:h100:4
 array_parallelism: 32
 tasks_per_node: 1
-cpus_per_task: 6
-timeout_min: 360
+cpus_per_task: 8
+timeout_min: 300
 account: rrg-bengioy-ad
 additional_parameters:
   no-requeue: true

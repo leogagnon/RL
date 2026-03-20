@@ -1,0 +1,9 @@
+# @package _global_
+
+generation:
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  max_new_tokens: 2048
+  use_beam_search: true
+  best_of: 4
+  vllm_cfg:
+    async_engine: false

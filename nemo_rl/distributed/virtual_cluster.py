@@ -111,54 +111,57 @@ def init_ray(log_dir: Optional[str] = None) -> None:
     cvd_tag_prefix = "nrl_tag_"
     cvd_tag = f"{cvd_tag_prefix}{cvd.replace(',', '_')}"
 
-    # Try to attach to an existing cluster
-    try:
-        ray.init(
-            address="auto",
-            log_to_driver=True,
-            include_dashboard=False,
-            runtime_env=runtime_env,
-            _temp_dir=os.path.abspath(log_dir) if log_dir else None,
-        )
+    # Try to attach to an existing cluster.
+    # Skip if log_dir is set: a custom tmpdir implies an isolated fresh cluster is wanted,
+    # and auto-discovery would risk connecting to another user's cluster.
+    if not log_dir:
+        try:
+            ray.init(
+                address="auto",
+                log_to_driver=True,
+                include_dashboard=False,
+                runtime_env=runtime_env,
+                _temp_dir=None,
+            )
 
-        cluster_res = ray.cluster_resources()
+            cluster_res = ray.cluster_resources()
 
-        # Check reusability for NeMo-RL managed local clusters
-        if any(k.startswith(cvd_tag_prefix) for k in cluster_res):
-            # Reuse if the driver's cvd_tag matches a tag in the cluster.
-            # This is for reusing a previously self-started local cluster.
-            if cvd_tag in cluster_res:
+            # Check reusability for NeMo-RL managed local clusters
+            if any(k.startswith(cvd_tag_prefix) for k in cluster_res):
+                # Reuse if the driver's cvd_tag matches a tag in the cluster.
+                # This is for reusing a previously self-started local cluster.
+                if cvd_tag in cluster_res:
+                    logger.info(
+                        f"Connected to existing Ray cluster (driver CVD_TAG '{cvd_tag}' matched): {cluster_res}"
+                    )
+                    return
+
+                # If neither reuse condition is met, but we connected to *something*
                 logger.info(
-                    f"Connected to existing Ray cluster (driver CVD_TAG '{cvd_tag}' matched): {cluster_res}"
+                    f"Existing Ray cluster found ({cluster_res}) but it does not meet reuse criteria. "
+                    f"Driver's cvd_tag: '{[k for k in cluster_res if k.startswith(cvd_tag_prefix)][0]}'. Expected cvd_tag: '{cvd_tag}'. "
+                    "Starting a new local cluster..."
                 )
+                ray.shutdown()
+
+                # Clear driver-side package cache so working_dir is re-uploaded
+                import importlib
+
+                import ray._private.runtime_env.packaging as _pkg
+
+                importlib.reload(_pkg)
+
+            # Always reuse if it's an externally managed cluster.
+            else:
+                logger.info(f"Connected to existing Ray cluster: {cluster_res}")
                 return
 
-            # If neither reuse condition is met, but we connected to *something*
-            logger.info(
-                f"Existing Ray cluster found ({cluster_res}) but it does not meet reuse criteria. "
-                f"Driver's cvd_tag: '{[k for k in cluster_res if k.startswith(cvd_tag_prefix)][0]}'. Expected cvd_tag: '{cvd_tag}'. "
-                "Starting a new local cluster..."
-            )
-            ray.shutdown()
-
+        except (ConnectionError, ValueError):
+            logger.debug("No existing Ray cluster found, will start a new one.")
+            # If ConnectionError, proceed to start a new local cluster without further action here.
             # Clear driver-side package cache so working_dir is re-uploaded
-            import importlib
-
-            import ray._private.runtime_env.packaging as _pkg
-
-            importlib.reload(_pkg)
-
-        # Always reuse if it's an externally managed cluster.
-        else:
-            logger.info(f"Connected to existing Ray cluster: {cluster_res}")
-            return
-
-    except ConnectionError:
-        logger.debug("No existing Ray cluster found, will start a new one.")
-        # If ConnectionError, proceed to start a new local cluster without further action here.
-        # Clear driver-side package cache so working_dir is re-uploaded
-        ray.shutdown()
-        pass
+            ray.shutdown()
+            pass
 
     # Start a brand-new local cluster
     # Reuse `runtime_env` but drop `working_dir` to avoid packaging the whole repo (prevents ray OSError: Failed to download runtime_env file package issue)

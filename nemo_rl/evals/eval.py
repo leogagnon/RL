@@ -19,6 +19,8 @@ from collections import Counter
 from itertools import combinations
 from typing import NotRequired, TypedDict
 
+import tqdm
+
 import ray
 import torch
 from torch.utils.data import DataLoader
@@ -329,7 +331,8 @@ async def _run_env_eval_impl(
     else:
         score = 0.0
 
-    for batch in dataloader:
+    printed_example = False
+    for batch in tqdm.tqdm(dataloader, desc="Evaluating", unit="batch", total=len(dataloader)):
         # measure multiple samples
         if num_tests_per_prompt > 1:
             batch = batch.repeat_interleave(num_tests_per_prompt)
@@ -344,6 +347,18 @@ async def _run_env_eval_impl(
         # generate by vllm
         inputs = BatchedDataDict({"prompts": prompts})
         outputs = await _generate_texts(vllm_generation, inputs, use_async)
+
+        # print one example for sanity check
+        if not printed_example:
+            print("\n" + "=" * 60)
+            print("SANITY CHECK — example 0")
+            print("=" * 60)
+            print("--- PROMPT ---")
+            print(prompts[0])
+            print("--- RESPONSE ---")
+            print(outputs[0])
+            print("=" * 60 + "\n")
+            printed_example = True
 
         # append to message_log
         for idx, output in enumerate(outputs):

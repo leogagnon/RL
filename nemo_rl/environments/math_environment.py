@@ -112,7 +112,8 @@ class HFVerifyWorker:
                             f"Unknown math_verify_impl: {math_verify_impl}. Expected 'hf_math_verify' or 'dapo_math_verify'."
                         )
 
-                results.append(float(ret_score))
+                score = float(ret_score)
+                ans = None
 
                 if return_extracted_answer:
                     # Make sure the extracted answer is not None and is a list of two elements
@@ -122,18 +123,24 @@ class HFVerifyWorker:
                     # Get the extracted answer with the same logic as in the HFVerifyWorker
                     for pred in extracted_prediction:
                         if any(grader.verify(gold, pred) for gold in extracted_gold):
-                            extracted_answers.append(pred)
+                            ans = pred
                             break
                     else:
                         # If no match is found, means all answers are incorrect, just use the first prediction
-                        extracted_answers.append(extracted_prediction[0][0])
+                        ans = extracted_prediction[0][0] if extracted_prediction else None
+
+                # Append both together so counts always stay in sync
+                results.append(score)
+                if return_extracted_answer:
+                    extracted_answers.append(ans)
 
             # It's possible to emit a TimeoutException and that wouldn't be caught since
             # it actually subclasses from BaseException and math-verify itself does not
             # to catch it.
             except (Exception, TimeoutException):
                 results.append(0.0)
-                extracted_answers.append(None)
+                if return_extracted_answer:
+                    extracted_answers.append(None)
 
         if return_extracted_answer:
             return results, extracted_answers

@@ -746,6 +746,21 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
             BatchedDataDict containing:
                 - texts: List of generated text responses
         """
+        def _get_tokenizer():
+            # MHLLM exposes .tokenizer; vLLM's LLM exposes .get_tokenizer()
+            return self.llm.tokenizer if hasattr(self.llm, "tokenizer") else self.llm.get_tokenizer()
+
+        def _log_first_prompt(token_ids: list[int], method: str) -> None:
+            tokenizer = _get_tokenizer()
+            decoded = tokenizer.decode(token_ids)
+            print("\n" + "=" * 70)
+            print(f"[vLLM input sanity check — method: {method}]")
+            print(f"  First {min(8, len(token_ids))} token IDs : {token_ids[:8]}")
+            double_bos = len(token_ids) >= 2 and token_ids[0] == token_ids[1] == tokenizer.bos_token_id
+            print(f"  Double BOS detected    : {double_bos}")
+            print(f"  Decoded prompt (first 200 chars):\n{decoded[:200]}")
+            print("=" * 70 + "\n")
+
         # Check if async engine is enabled
         if self.cfg["vllm_cfg"]["async_engine"]:
             raise RuntimeError(
@@ -782,6 +797,10 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
                 alpha=mh_alpha,
                 temperature=1.0 / mh_alpha,
             )
+            _log_first_prompt(
+                self.llm.tokenizer.encode(data["prompts"][0], add_special_tokens=False),
+                "mh-llm (note: mh-llm pre-tokenizes with add_special_tokens=False)",
+            )
             texts = self.llm.mh_sample(
                 prompts=data["prompts"],
                 sampling_params=mh_params,
@@ -799,8 +818,15 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
                 length_penalty=1.0,
                 include_stop_str_in_output=True,
             )
+            tokenizer = _get_tokenizer()
+            first_beam_ids = tokenizer.encode(data["prompts"][0], add_special_tokens=False)
+            _log_first_prompt(first_beam_ids, "beam-search")
             outputs = self.llm.beam_search(
-                [{"prompt": p} for p in data["prompts"]], beam_params
+                [
+                    {"prompt_token_ids": tokenizer.encode(p, add_special_tokens=False)}
+                    for p in data["prompts"]
+                ],
+                beam_params,
             )
             texts = [output.sequences[0].text for output in outputs]
         else:
@@ -814,7 +840,19 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
                 stop=stop_strings,
                 include_stop_str_in_output=True,  # returning stop strings like hf
             )
-            outputs = self.llm.generate(data["prompts"], sampling_params)
+            # Convert text prompts to token IDs with add_special_tokens=False to
+            # avoid a double-BOS: vLLM's default tokenization prepends BOS even
+            # when the chat template string already contains one.
+            tokenizer = _get_tokenizer()
+            first_ids = tokenizer.encode(data["prompts"][0], add_special_tokens=False) if isinstance(data["prompts"][0], str) else data["prompts"][0]["prompt_token_ids"]
+            _log_first_prompt(first_ids, "default")
+            prompts = [
+                {"prompt_token_ids": tokenizer.encode(p, add_special_tokens=False)}
+                if isinstance(p, str)
+                else p
+                for p in data["prompts"]
+            ]
+            outputs = self.llm.generate(prompts, sampling_params)
             texts = [output.outputs[0].text for output in outputs]
 
         # Convert to BatchedDataDict

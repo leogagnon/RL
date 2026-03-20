@@ -16,6 +16,7 @@ import os
 import pprint
 import sys
 import warnings
+from datetime import datetime
 
 warnings.filterwarnings("ignore", message="Skipping import of cpp extensions", module="torchao")
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="torchao")
@@ -134,6 +135,18 @@ def main(cfg: DictConfig):
     print("Final config:")
     pprint.pprint(config)
 
+    # Auto-detect number of GPUs if not explicitly set
+    if config["cluster"].get("gpus_per_node") is None:
+        import torch
+        config["cluster"]["gpus_per_node"] = torch.cuda.device_count()
+        print(f"Auto-detected {config['cluster']['gpus_per_node']} GPUs")
+
+    # Append date subfolder to save_path so runs don't overwrite each other
+    if config["eval"].get("save_path"):
+        config["eval"]["save_path"] = os.path.join(
+            config["eval"]["save_path"], datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        )
+
     # Auto-convert NeMo RL checkpoint to HF format if needed
     config["generation"]["model_name"] = maybe_convert_checkpoint(
         config["generation"]["model_name"]
@@ -141,7 +154,20 @@ def main(cfg: DictConfig):
     config["tokenizer"]["name"] = config["generation"]["model_name"]
 
     # Init ray
-    init_ray()
+    ray_tmpdir = config["cluster"].get("ray_tmpdir")
+    if ray_tmpdir is None:
+        import getpass, glob
+        matches = glob.glob(f"/tmp/{getpass.getuser()}.*")
+        if matches:
+            ray_tmpdir = matches[0]
+    if ray_tmpdir is not None:
+        # Use a fresh per-run subdirectory so stale sessions are never found.
+        # Also set RAY_TMPDIR so Ray's auto-discovery doesn't pick up other users' clusters.
+        ray_tmpdir = os.path.join(ray_tmpdir, f"ray_{os.getpid()}")
+        os.makedirs(ray_tmpdir, exist_ok=True)
+        os.environ["RAY_TMPDIR"] = ray_tmpdir
+        print(f"Using ray_tmpdir: {ray_tmpdir}")
+    init_ray(log_dir=ray_tmpdir)
 
     # Setup tokenizer
     tokenizer = get_tokenizer(config["tokenizer"])

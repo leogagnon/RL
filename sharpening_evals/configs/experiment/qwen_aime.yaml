@@ -1,0 +1,10 @@
+# @package _global_
+
+generation:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  max_new_tokens: 4096
+  vllm_cfg:
+    max_model_len: 4096
+
+data:
+  dataset_name: aime2025

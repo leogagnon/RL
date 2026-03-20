@@ -1,0 +1,11 @@
+# @package _global_
+
+generation:
+  model_name: meta-llama/Llama-3.2-3B-Instruct
+  max_new_tokens: 4096
+  use_mh_sampling: true
+  mh_alpha: 4.0
+  mh_block_size: 128
+  mh_num_mcmc_steps: 10
+  vllm_cfg:
+    async_engine: false
